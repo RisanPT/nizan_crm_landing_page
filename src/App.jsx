@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import nizanLogo from '../../nizan_crm/assets/images/nizan_logo.png';
+import nizanLogo from './assets/nizan_logo.png';
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ??
