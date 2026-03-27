@@ -11,7 +11,8 @@ const initialForm = {
   email: '',
   regionId: '',
   packageId: '',
-  selectedDate: '',
+  eventSlot: '',
+  selectedDates: [],
 };
 
 function App() {
@@ -26,6 +27,11 @@ function App() {
   const [error, setError] = useState('');
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [activeTooltip, setActiveTooltip] = useState(null);
+  const [cartItems, setCartItems] = useState([]);
+  const totalPackageCount = useMemo(
+    () => cartItems.reduce((sum, item) => sum + item.quantity, 0),
+    [cartItems],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -85,17 +91,46 @@ function App() {
     [regions, form.regionId],
   );
 
+  const bookingItems = useMemo(() => {
+    const sortedSelectedDates = [...form.selectedDates].sort();
+
+    return cartItems
+      .flatMap((item) => {
+        const packageDoc = packages.find((pkg) => pkg.id === item.packageId);
+        if (!packageDoc) return [];
+
+        const basePrice = !form.regionId
+          ? packageDoc.price
+          : (packageDoc.regionPrices.find(
+              (regionPrice) => regionPrice.regionId === form.regionId,
+            )?.price ?? packageDoc.price);
+
+        return Array.from({ length: item.quantity }, () => ({
+          packageId: packageDoc.id,
+          service: packageDoc.name,
+          eventSlot: item.eventSlot,
+          selectedDates: sortedSelectedDates,
+          totalPrice: basePrice,
+          advanceAmount: packageDoc.advanceAmount ?? 3000,
+        }));
+      })
+      .filter(Boolean);
+  }, [cartItems, form.regionId, form.selectedDates, packages]);
+
   const totalAmount = useMemo(() => {
-    if (!selectedPackage) return 0;
-    if (!form.regionId) return selectedPackage.price;
-
-    const regionalMatch = selectedPackage.regionPrices.find(
-      (item) => item.regionId === form.regionId,
+    return (
+      bookingItems.reduce((sum, item) => sum + item.totalPrice, 0) +
+      Math.max(0, form.selectedDates.length - 1) * 3000
     );
-    return regionalMatch?.price ?? selectedPackage.price;
-  }, [selectedPackage, form.regionId]);
+  }, [bookingItems, form.selectedDates.length]);
 
-  const advanceAmount = selectedPackage?.advanceAmount ?? 0;
+  const advanceAmount = useMemo(() => {
+    return bookingItems.reduce((sum, item) => sum + item.advanceAmount, 0);
+  }, [bookingItems]);
+
+  const additionalPackageAdvance = useMemo(() => {
+    return Math.max(0, totalPackageCount - 1) * 3000;
+  }, [totalPackageCount]);
 
   const calendarDays = useMemo(
     () => buildCalendarDays(currentMonth, blockedDates),
@@ -104,10 +139,36 @@ function App() {
 
   const onFieldChange = (field) => (event) => {
     const value = event.target.value;
+      setForm((prev) => ({
+        ...prev,
+        [field]: value,
+    }));
+    setShowConfirmation(false);
+  };
+
+  const addPackageToCart = () => {
+    if (!selectedPackage) {
+      setError('Please select a package before adding it to the cart.');
+      return;
+    }
+
+    setCartItems((prev) => {
+      const normalizedSlot = form.eventSlot.trim();
+      return [
+        ...prev,
+        {
+          id: `${selectedPackage.id}-${Date.now()}-${prev.length}`,
+          packageId: selectedPackage.id,
+          eventSlot: normalizedSlot,
+          quantity: 1,
+        },
+      ];
+    });
     setForm((prev) => ({
       ...prev,
-      [field]: value,
+      eventSlot: '',
     }));
+    setError('');
     setShowConfirmation(false);
   };
 
@@ -127,15 +188,17 @@ function App() {
     setActiveTooltip(null);
     setForm((prev) => ({
       ...prev,
-      selectedDate: day.value,
+      selectedDates: prev.selectedDates.includes(day.value)
+        ? prev.selectedDates.filter((value) => value !== day.value)
+        : [...prev.selectedDates, day.value].sort(),
     }));
   };
 
   async function handleSubmit(event) {
     event.preventDefault();
 
-    if (!selectedPackage) {
-      setError('Please select a package.');
+    if (bookingItems.length === 0) {
+      setError('Please add at least one package to the cart.');
       return;
     }
 
@@ -149,26 +212,28 @@ function App() {
       return;
     }
 
-    if (!form.selectedDate) {
-      setError('Please choose an available event date.');
+    if (form.selectedDates.length === 0) {
+      setError('Please choose at least one available event date.');
       return;
     }
 
-    const bookingStart = new Date(`${form.selectedDate}T09:00:00`);
-    const bookingEnd = new Date(`${form.selectedDate}T10:00:00`);
+    const sortedSelectedDates = [...form.selectedDates].sort();
 
     const payload = {
       customerName: form.customerName.trim(),
       phone: form.phone.trim(),
       email: form.email.trim(),
-      packageId: selectedPackage.id,
+      packageId: bookingItems[0].packageId,
       regionId: selectedRegion?.id ?? '',
-      service: selectedPackage.name,
+      service: bookingItems.map((item) => item.service).join(' + '),
+      eventSlot: bookingItems
+        .map((item) => item.eventSlot.trim())
+        .filter(Boolean)
+        .join(' | '),
       region: selectedRegion?.name ?? '',
+      selectedDates: sortedSelectedDates,
+      bookingItems,
       status: 'pending',
-      bookingDate: bookingStart.toISOString(),
-      serviceStart: bookingStart.toISOString(),
-      serviceEnd: bookingEnd.toISOString(),
       totalPrice: totalAmount,
       advanceAmount,
       discountAmount: 0,
@@ -240,6 +305,7 @@ function App() {
                 onBookAnother={() => {
                   setShowConfirmation(false);
                   setError('');
+                  setCartItems([]);
                   setForm({
                     ...initialForm,
                     packageId: packages[0]?.id || '',
@@ -312,9 +378,89 @@ function App() {
                       />
                       <div className="helper-inline">
                         <ion-icon name="information-circle-outline" />
-                        Advance required to confirm booking
+                        Add each package to the cart for this booking
                       </div>
                     </div>
+                  </div>
+                  <div className="field-grid">
+                    <Field
+                      label="Package Slot (Optional)"
+                      value={form.eventSlot}
+                      onChange={onFieldChange('eventSlot')}
+                      placeholder="e.g. Morning Wedding"
+                      icon="time-outline"
+                    />
+                    <div className="cart-action-shell">
+                      <label className="field-label">Package Cart</label>
+                      <button
+                        type="button"
+                        className="submit-button secondary-button"
+                        onClick={addPackageToCart}
+                      >
+                        <span>Add Package</span>
+                        <ion-icon name="add-outline" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="selected-date-pills">
+                    {bookingItems.length > 0 ? (
+                      cartItems.map((item, index) => {
+                        const packageDoc = packages.find(
+                          (pkg) => pkg.id === item.packageId,
+                        );
+                        return (
+                          <span key={item.id ?? index} className="selected-date-pill">
+                            {packageDoc?.name ?? 'Package'}
+                            {item.eventSlot ? ` • ${item.eventSlot}` : ''}
+                            <span className="pill-qty-controls">
+                              <button
+                                type="button"
+                                className="pill-remove"
+                                onClick={() =>
+                                  setCartItems((prev) =>
+                                    prev
+                                      .map((cartItem) =>
+                                        cartItem.id === item.id
+                                          ? {
+                                              ...cartItem,
+                                              quantity: cartItem.quantity - 1,
+                                            }
+                                          : cartItem,
+                                      )
+                                      .filter((cartItem) => cartItem.quantity > 0),
+                                  )
+                                }
+                              >
+                                −
+                              </button>
+                              <span>{item.quantity}</span>
+                              <button
+                                type="button"
+                                className="pill-remove"
+                                onClick={() =>
+                                  setCartItems((prev) =>
+                                    prev.map((cartItem) =>
+                                      cartItem.id === item.id
+                                        ? {
+                                            ...cartItem,
+                                            quantity: cartItem.quantity + 1,
+                                          }
+                                        : cartItem,
+                                    ),
+                                  )
+                                }
+                              >
+                                +
+                              </button>
+                            </span>
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="selected-date-pill muted">
+                        No packages added yet
+                      </span>
+                    )}
                   </div>
                 </BookingSection>
 
@@ -366,7 +512,9 @@ function App() {
                               'calendar-day',
                               !day.isCurrentMonth ? 'outside' : '',
                               day.isLocked ? 'locked' : '',
-                              form.selectedDate === day.value ? 'selected' : '',
+                              form.selectedDates.includes(day.value)
+                                ? 'selected'
+                                : '',
                             ]
                               .filter(Boolean)
                               .join(' ');
@@ -413,13 +561,18 @@ function App() {
                       </div>
 
                       <div className="selected-date-pills">
-                        {form.selectedDate ? (
-                          <span className="selected-date-pill">
-                            {formatDate(new Date(`${form.selectedDate}T00:00:00`))}
-                          </span>
+                        {form.selectedDates.length > 0 ? (
+                          form.selectedDates.map((selectedDate) => (
+                            <span
+                              key={selectedDate}
+                              className="selected-date-pill"
+                            >
+                              {formatDate(new Date(`${selectedDate}T00:00:00`))}
+                            </span>
+                          ))
                         ) : (
                           <span className="selected-date-pill muted">
-                            No date selected yet
+                            No dates selected yet
                           </span>
                         )}
                       </div>
@@ -429,25 +582,40 @@ function App() {
                       <div className="field-block">
                         <label className="field-label">Booking Status</label>
                         <div className="time-empty static-card">
-                          {form.selectedDate
-                            ? 'Your selected date will be sent to our sales team. Exact timing will be confirmed by admin.'
-                            : 'Select your preferred date. Timing will be coordinated by the admin team later.'}
+                          {form.selectedDates.length > 0
+                            ? 'Your selected dates will be sent to our sales team. Exact timing will be confirmed by admin.'
+                            : 'Select your preferred dates. Timing will be coordinated by the admin team later.'}
                         </div>
                       </div>
 
                       <div className="summary-panel">
                         <div className="summary-row">
                           <span>Session Duration</span>
-                          <strong>1 Day</strong>
+                          <strong>
+                            {form.selectedDates.length || 0} Day
+                            {form.selectedDates.length === 1 ? '' : 's'}
+                          </strong>
                         </div>
                         <div className="summary-row">
-                          <span>Preferred Date</span>
+                          <span>Packages in Cart</span>
+                          <strong>{totalPackageCount}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Preferred Dates</span>
                           <strong>
-                            {form.selectedDate
-                              ? formatDate(new Date(`${form.selectedDate}T00:00:00`))
+                            {form.selectedDates.length > 0
+                              ? `${form.selectedDates.length} selected`
                               : 'Not selected'}
                           </strong>
                         </div>
+                        {totalPackageCount > 1 ? (
+                          <div className="summary-row">
+                            <span>Extra Package Advance</span>
+                            <strong>
+                              ₹{formatCurrency(Math.max(0, totalPackageCount - 1) * 3000)}
+                            </strong>
+                          </div>
+                        ) : null}
                         <div className="summary-divider" />
                         <div className="advance-summary">
                           <div>
@@ -455,19 +623,21 @@ function App() {
                               Advance to Confirm
                             </div>
                             <div className="advance-note">
-                              Advance payment confirms your slot instantly.
+                              Each added package contributes its own advance.
                             </div>
                           </div>
                           <div className="advance-amount">
-                            ₹{formatCurrency(advanceAmount)}
+                          <strong>₹{formatCurrency(advanceAmount)}</strong>
                           </div>
                         </div>
                         <div className="summary-footnote">
-                          {form.selectedDate
-                            ? `${formatDate(
-                                new Date(`${form.selectedDate}T00:00:00`),
-                              )} is available. Admin can block whole dates from CRM, but time is not selected by the client.`
-                            : 'Choose your date to see live availability.'}
+                          {form.selectedDates.length > 0 && bookingItems.length > 0
+                            ? `${totalPackageCount} package${
+                                totalPackageCount === 1 ? '' : 's'
+                              } across ${form.selectedDates.length} selected date${
+                                form.selectedDates.length === 1 ? '' : 's'
+                              } will be reviewed by admin. This booking needs ₹${formatCurrency(advanceAmount)} in advance to confirm.`
+                            : 'Choose your dates and add packages to see the confirmation advance.'}
                         </div>
                       </div>
                     </div>
@@ -690,8 +860,18 @@ function normalizeBooking(item) {
     ...item,
     id: item._id ?? item.id ?? '',
     bookingDate: item.bookingDate ?? item.serviceStart,
+    selectedDates: item.selectedDates ?? [],
     serviceStart: item.serviceStart,
     serviceEnd: item.serviceEnd,
+    bookingItems: (item.bookingItems ?? []).map((bookingItem) => ({
+      ...bookingItem,
+      packageId: bookingItem.packageId ?? '',
+      service: bookingItem.service ?? '',
+      eventSlot: bookingItem.eventSlot ?? '',
+      selectedDates: bookingItem.selectedDates ?? [],
+      totalPrice: Number(bookingItem.totalPrice ?? 0),
+      advanceAmount: Number(bookingItem.advanceAmount ?? 0),
+    })),
   };
 }
 
